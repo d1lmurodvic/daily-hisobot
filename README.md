@@ -21,8 +21,25 @@ Professional Telegram expense tracker bot built with:
 
 ```bash
 npm install
-cp .env.example .env
-npm run prisma:generate
+npm run build
+```
+
+Create a local `.env` file:
+
+```env
+BOT_TOKEN=your_new_botfather_token_here
+DATABASE_URL="file:./dev.db"
+```
+
+Then run:
+
+```bash
+npm start
+```
+
+For development with auto-restart:
+
+```bash
 npm run dev
 ```
 
