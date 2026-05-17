@@ -15,4 +15,11 @@ model Expense {
   description String
   date        String
   createdAt   DateTime @default(now())
+
+  @@index([telegramId, date])
+}
+
+model UserSetting {
+  telegramId String @id
+  dailyLimit Int?
 }
