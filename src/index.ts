@@ -45,6 +45,25 @@ const months = [
 
 bot.use(session({ defaultSession: (): SessionData => ({}) }));
 
+async function ensureDatabase() {
+  await prisma.$executeRaw`
+    CREATE TABLE IF NOT EXISTS "Expense" (
+      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      "telegramId" TEXT NOT NULL,
+      "amount" INTEGER NOT NULL,
+      "category" TEXT NOT NULL,
+      "description" TEXT NOT NULL,
+      "date" TEXT NOT NULL,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `;
+
+  await prisma.$executeRaw`
+    CREATE INDEX IF NOT EXISTS "Expense_telegramId_date_idx"
+    ON "Expense" ("telegramId", "date")
+  `;
+}
+
 function formatDate(date = new Date()) {
   return new Intl.DateTimeFormat("en-GB", {
     day: "2-digit",
@@ -85,9 +104,9 @@ function money(amount: number) {
 
 function mainKeyboard() {
   return Markup.keyboard([
-    ["➕ Xarajat qo'shish"],
-    ["📋 Xarajatlarni ko'rish"],
-    ["📊 Oylik hisobot"],
+    ["Xarajat qo'shish"],
+    ["Xarajatlarni ko'rish"],
+    ["Oylik hisobot"],
   ]).resize();
 }
 
@@ -133,7 +152,7 @@ function monthKeyboard() {
 function renderExpenses(title: string, expenses: Array<{ amount: number; category: string; description: string }>) {
   const total = expenses.reduce((sum, expense) => sum + expense.amount, 0);
   const list = expenses
-    .map((expense) => `• ${money(expense.amount)} so'm | ${expense.category} | ${expense.description}`)
+    .map((expense) => `- ${money(expense.amount)} so'm | ${expense.category} | ${expense.description}`)
     .join("\n");
 
   return `${title}\n\n${list}\n\nUmumiy: ${money(total)} so'm`;
@@ -177,7 +196,7 @@ bot.command("cancel", async (ctx) => {
   await ctx.reply("Amal bekor qilindi.", mainKeyboard());
 });
 
-bot.hears("➕ Xarajat qo'shish", async (ctx) => {
+bot.hears("Xarajat qo'shish", async (ctx) => {
   ctx.session = { step: "category" };
   await ctx.reply("Xarajat kategoriyasini tanlang:", categoryKeyboard());
 });
@@ -214,7 +233,7 @@ bot.action("cancel", async (ctx) => {
   await ctx.reply("Amal bekor qilindi.", mainKeyboard());
 });
 
-bot.hears("📋 Xarajatlarni ko'rish", async (ctx) => {
+bot.hears("Xarajatlarni ko'rish", async (ctx) => {
   await ctx.reply(
     "Qaysi hisobot kerak?",
     Markup.inlineKeyboard([
@@ -236,7 +255,7 @@ bot.action("other_day", async (ctx) => {
   await ctx.reply(`Sanani kiriting. Masalan: ${formatDate()}`);
 });
 
-bot.hears("📊 Oylik hisobot", async (ctx) => {
+bot.hears("Oylik hisobot", async (ctx) => {
   await ctx.reply("Oyni tanlang:", monthKeyboard());
 });
 
@@ -339,6 +358,14 @@ bot.catch((error, ctx) => {
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
 
-bot.launch().then(() => {
+async function main() {
+  await ensureDatabase();
+  await bot.launch();
   console.log("Bot ishga tushdi");
+}
+
+main().catch(async (error) => {
+  console.error("Startup error:", error);
+  await prisma.$disconnect();
+  process.exit(1);
 });
