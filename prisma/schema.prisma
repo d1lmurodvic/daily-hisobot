@@ -20,6 +20,12 @@ model Expense {
 }
 
 model UserSetting {
-  telegramId String @id
-  dailyLimit Int?
+  telegramId       String  @id
+  dailyLimit       Int?
+  reminderEnabled  Boolean @default(true)
+  reminderHour     Int     @default(21)
+  lastReminderDate String?
+  goalName         String?
+  goalTarget       Int?
+  goalSaved        Int     @default(0)
 }

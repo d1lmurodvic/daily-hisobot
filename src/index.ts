@@ -23,7 +23,10 @@ type FlowStep =
   | "editDate"
   | "editAmount"
   | "editDescription"
-  | "dailyLimit";
+  | "dailyLimit"
+  | "goalName"
+  | "goalTarget"
+  | "goalSaving";
 
 interface SessionData {
   step?: FlowStep;
@@ -31,6 +34,7 @@ interface SessionData {
   category?: string;
   editingExpenseId?: number;
   editAmount?: number;
+  goalName?: string;
 }
 
 interface BotContext extends Context {
@@ -50,6 +54,12 @@ type ExpenseItem = {
 type UserSetting = {
   telegramId: string;
   dailyLimit: number | null;
+  reminderEnabled: number;
+  reminderHour: number;
+  lastReminderDate: string | null;
+  goalName: string | null;
+  goalTarget: number | null;
+  goalSaved: number | null;
 };
 
 const timeZone = "Asia/Tashkent";
@@ -91,6 +101,9 @@ const helpText = [
   "🏷️ kategoriyaga ajrataman",
   "📅 kunlik va haftalik hisobot chiqaraman",
   "📊 oylik hisobot va top kategoriya ko'rsataman",
+  "📈 rasmli grafik hisobot beraman",
+  "⏰ kechki smart eslatma yuboraman",
+  "🏦 maqsad uchun qancha pul yig'ilganini kuzataman",
   "🎯 kunlik limit qo'yaman",
   "✏️ xarajatni tahrirlash va 🗑️ o'chirishga yordam beraman",
   "📤 CSV export beraman",
@@ -119,10 +132,48 @@ async function ensureDatabase() {
   await prisma.$executeRaw`
     CREATE TABLE IF NOT EXISTS "UserSetting" (
       "telegramId" TEXT NOT NULL PRIMARY KEY,
-      "dailyLimit" INTEGER
+      "dailyLimit" INTEGER,
+      "reminderEnabled" INTEGER NOT NULL DEFAULT 1,
+      "reminderHour" INTEGER NOT NULL DEFAULT 21,
+      "lastReminderDate" TEXT,
+      "goalName" TEXT,
+      "goalTarget" INTEGER,
+      "goalSaved" INTEGER NOT NULL DEFAULT 0
     )
   `;
+
+  await ensureColumn("UserSetting", "reminderEnabled", "INTEGER NOT NULL DEFAULT 1");
+  await ensureColumn("UserSetting", "reminderHour", "INTEGER NOT NULL DEFAULT 21");
+  await ensureColumn("UserSetting", "lastReminderDate", "TEXT");
+  await ensureColumn("UserSetting", "goalName", "TEXT");
+  await ensureColumn("UserSetting", "goalTarget", "INTEGER");
+  await ensureColumn("UserSetting", "goalSaved", "INTEGER NOT NULL DEFAULT 0");
 }
+
+async function ensureColumn(table: string, column: string, definition: string) {
+  const columns = await prisma.$queryRawUnsafe<Array<{ name: string }>>(`PRAGMA table_info("${table}")`);
+  const exists = columns.some((item) => item.name === column);
+
+  if (!exists) {
+    await prisma.$executeRawUnsafe(`ALTER TABLE "${table}" ADD COLUMN "${column}" ${definition}`);
+  }
+}
+
+async function registerUser(telegramId: string) {
+  await prisma.$executeRaw`
+    INSERT INTO "UserSetting" ("telegramId", "reminderEnabled", "reminderHour", "goalSaved")
+    VALUES (${telegramId}, 1, 21, 0)
+    ON CONFLICT("telegramId") DO NOTHING
+  `;
+}
+
+bot.use(async (ctx, next) => {
+  if (ctx.from?.id) {
+    await registerUser(String(ctx.from.id));
+  }
+
+  return next();
+});
 
 function formatDate(date = new Date()) {
   return new Intl.DateTimeFormat("en-GB", {
@@ -131,6 +182,18 @@ function formatDate(date = new Date()) {
     year: "numeric",
     timeZone,
   }).format(date);
+}
+
+function getTashkentHour() {
+  const hour = new Intl.DateTimeFormat("en-GB", {
+    hour: "2-digit",
+    hour12: false,
+    timeZone,
+  })
+    .formatToParts(new Date())
+    .find((part) => part.type === "hour")?.value;
+
+  return Number(hour || 0);
 }
 
 function parseStoredDate(value: string) {
@@ -180,8 +243,9 @@ function mainKeyboard() {
   return Markup.keyboard([
     ["➕ Xarajat qo'shish"],
     ["📋 Hisobotlar", "📊 Oylik hisobot"],
-    ["🎯 Limit", "⚙️ Boshqarish"],
-    ["ℹ️ Bot haqida"],
+    ["📈 Grafik hisobot", "⏰ Eslatma"],
+    ["🎯 Limit", "🏦 Maqsad"],
+    ["⚙️ Boshqarish", "ℹ️ Bot haqida"],
   ]).resize();
 }
 
@@ -219,6 +283,7 @@ function reportKeyboard() {
     [Markup.button.callback("📅 Bugungi sarf", "today")],
     [Markup.button.callback("🗓️ Boshqa kun", "other_day")],
     [Markup.button.callback("📆 Haftalik hisobot", "weekly")],
+    [Markup.button.callback("📈 Grafik hisobot", "chart_report")],
     [Markup.button.callback("🏆 Top kategoriya", "top_category")],
     [Markup.button.callback("📤 CSV export", "export_csv")],
   ]);
@@ -229,6 +294,27 @@ function manageKeyboard() {
     [Markup.button.callback("✏️ Xarajatni tahrirlash", "edit_expense")],
     [Markup.button.callback("🗑️ Xarajatni o'chirish", "delete_expense")],
     [Markup.button.callback("❌ Bekor qilish", "cancel")],
+  ]);
+}
+
+function reminderKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback("✅ Eslatmani yoqish", "reminder_on")],
+    [Markup.button.callback("🔕 Eslatmani o'chirish", "reminder_off")],
+    [
+      Markup.button.callback("20:00", "reminder_hour_20"),
+      Markup.button.callback("21:00", "reminder_hour_21"),
+      Markup.button.callback("22:00", "reminder_hour_22"),
+    ],
+  ]);
+}
+
+function goalKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback("🎯 Maqsad qo'yish", "goal_set")],
+    [Markup.button.callback("➕ Yig'ilgan pul qo'shish", "goal_add")],
+    [Markup.button.callback("📈 Holatini ko'rish", "goal_view")],
+    [Markup.button.callback("🧹 Maqsadni tozalash", "goal_clear")],
   ]);
 }
 
@@ -274,6 +360,72 @@ function renderExpensesWithIds(title: string, expenses: ExpenseItem[]) {
   return `${title}\n\n${list}\n\n💰 Umumiy: ${money(total)} so'm`;
 }
 
+function renderGoal(setting: UserSetting | null) {
+  if (!setting?.goalName || !setting.goalTarget) {
+    return "🏦 Hali maqsad qo'yilmagan.\n\nMasalan: telefon, sayohat, o'qish yoki zaxira fond.";
+  }
+
+  const saved = setting.goalSaved || 0;
+  const percent = Math.min(100, Math.round((saved / setting.goalTarget) * 100));
+  const filled = Math.round(percent / 10);
+  const bar = "🟩".repeat(filled) + "⬜".repeat(10 - filled);
+  const left = Math.max(0, setting.goalTarget - saved);
+
+  return [
+    `🏦 Maqsad: ${setting.goalName}`,
+    `🎯 Kerak: ${money(setting.goalTarget)} so'm`,
+    `💰 Yig'ildi: ${money(saved)} so'm`,
+    `📌 Qoldi: ${money(left)} so'm`,
+    `📈 Progress: ${bar} ${percent}%`,
+  ].join("\n");
+}
+
+function escapeXml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function createChartSvg(title: string, expenses: ExpenseItem[]) {
+  const totals = new Map<string, number>();
+
+  for (const expense of expenses) {
+    totals.set(expense.category, (totals.get(expense.category) || 0) + expense.amount);
+  }
+
+  const rows = [...totals.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6);
+  const total = rows.reduce((sum, [, amount]) => sum + amount, 0);
+  const max = Math.max(...rows.map(([, amount]) => amount), 1);
+  const palette = ["#10b981", "#f59e0b", "#3b82f6", "#ef4444", "#8b5cf6", "#14b8a6"];
+  const bars = rows
+    .map(([category, amount], index) => {
+      const width = Math.max(28, Math.round((amount / max) * 560));
+      const y = 230 + index * 92;
+
+      return `
+        <text x="90" y="${y - 14}" font-size="28" fill="#111827">${escapeXml(category)}</text>
+        <rect x="90" y="${y}" width="560" height="34" rx="17" fill="#e5e7eb"/>
+        <rect x="90" y="${y}" width="${width}" height="34" rx="17" fill="${palette[index % palette.length]}"/>
+        <text x="680" y="${y + 27}" font-size="26" fill="#111827">${money(amount)} so'm</text>
+      `;
+    })
+    .join("");
+
+  return `
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1080" viewBox="0 0 1080 1080">
+  <rect width="1080" height="1080" rx="80" fill="#f8fafc"/>
+  <circle cx="920" cy="120" r="110" fill="#d1fae5"/>
+  <circle cx="150" cy="940" r="130" fill="#fef3c7"/>
+  <rect x="56" y="56" width="968" height="968" rx="64" fill="#ffffff" stroke="#d1d5db" stroke-width="3"/>
+  <text x="90" y="132" font-size="44" font-weight="700" fill="#064e3b">${escapeXml(title)}</text>
+  <text x="90" y="178" font-size="28" fill="#475569">Umumiy xarajat: ${money(total)} so'm</text>
+  ${bars}
+  <text x="90" y="958" font-size="26" fill="#64748b">Kunlik Sarf Bot • grafik hisobot</text>
+</svg>`;
+}
+
 async function getExpensesForUser(telegramId: string) {
   return prisma.expense.findMany({
     where: { telegramId },
@@ -283,7 +435,10 @@ async function getExpensesForUser(telegramId: string) {
 
 async function getSetting(telegramId: string) {
   const rows = await prisma.$queryRaw<UserSetting[]>`
-    SELECT "telegramId", "dailyLimit" FROM "UserSetting" WHERE "telegramId" = ${telegramId}
+    SELECT "telegramId", "dailyLimit", "reminderEnabled", "reminderHour",
+           "lastReminderDate", "goalName", "goalTarget", "goalSaved"
+    FROM "UserSetting"
+    WHERE "telegramId" = ${telegramId}
   `;
 
   return rows[0] || null;
@@ -291,9 +446,49 @@ async function getSetting(telegramId: string) {
 
 async function setDailyLimit(telegramId: string, dailyLimit: number) {
   await prisma.$executeRaw`
-    INSERT INTO "UserSetting" ("telegramId", "dailyLimit")
-    VALUES (${telegramId}, ${dailyLimit})
+    INSERT INTO "UserSetting" ("telegramId", "dailyLimit", "reminderEnabled", "reminderHour", "goalSaved")
+    VALUES (${telegramId}, ${dailyLimit}, 1, 21, 0)
     ON CONFLICT("telegramId") DO UPDATE SET "dailyLimit" = ${dailyLimit}
+  `;
+}
+
+async function setReminder(telegramId: string, enabled: boolean, hour?: number) {
+  const current = await getSetting(telegramId);
+  const nextHour = hour ?? current?.reminderHour ?? 21;
+
+  await prisma.$executeRaw`
+    INSERT INTO "UserSetting" ("telegramId", "reminderEnabled", "reminderHour", "goalSaved")
+    VALUES (${telegramId}, ${enabled ? 1 : 0}, ${nextHour}, 0)
+    ON CONFLICT("telegramId") DO UPDATE SET
+      "reminderEnabled" = ${enabled ? 1 : 0},
+      "reminderHour" = ${nextHour}
+  `;
+}
+
+async function setGoal(telegramId: string, goalName: string, goalTarget: number) {
+  await prisma.$executeRaw`
+    INSERT INTO "UserSetting" ("telegramId", "goalName", "goalTarget", "goalSaved", "reminderEnabled", "reminderHour")
+    VALUES (${telegramId}, ${goalName}, ${goalTarget}, 0, 1, 21)
+    ON CONFLICT("telegramId") DO UPDATE SET
+      "goalName" = ${goalName},
+      "goalTarget" = ${goalTarget},
+      "goalSaved" = 0
+  `;
+}
+
+async function addGoalSaving(telegramId: string, amount: number) {
+  await prisma.$executeRaw`
+    UPDATE "UserSetting"
+    SET "goalSaved" = COALESCE("goalSaved", 0) + ${amount}
+    WHERE "telegramId" = ${telegramId}
+  `;
+}
+
+async function clearGoal(telegramId: string) {
+  await prisma.$executeRaw`
+    UPDATE "UserSetting"
+    SET "goalName" = NULL, "goalTarget" = NULL, "goalSaved" = 0
+    WHERE "telegramId" = ${telegramId}
   `;
 }
 
@@ -372,6 +567,25 @@ async function showTopCategory(ctx: BotContext) {
   return ctx.reply(`🏆 Eng ko'p pul ketgan kategoriyalar:\n\n${lines.join("\n")}`);
 }
 
+async function showChart(ctx: BotContext) {
+  const selectedMonth = getMonthName(formatDate());
+  const expenses = await getExpensesForUser(getTelegramId(ctx));
+  const filtered = expenses.filter((expense) => getMonthName(expense.date) === selectedMonth);
+
+  if (!filtered.length) {
+    return ctx.reply("📭 Grafik uchun bu oyda xarajat topilmadi.");
+  }
+
+  const svg = createChartSvg(`📈 ${selectedMonth} grafik hisoboti`, filtered);
+
+  await ctx.replyWithDocument({
+    source: Buffer.from(svg, "utf8"),
+    filename: `grafik-hisobot-${selectedMonth}.svg`,
+  });
+
+  return ctx.reply("📈 Grafik hisobot tayyor. Faylni ochib kategoriyalar bo'yicha xarajatlarni ko'rishingiz mumkin.");
+}
+
 async function exportCsv(ctx: BotContext) {
   const expenses = await getExpensesForUser(getTelegramId(ctx));
 
@@ -411,6 +625,49 @@ async function sendCategorySticker(ctx: BotContext, category: string) {
   }
 }
 
+async function sendDueReminders() {
+  const today = formatDate();
+  const hour = getTashkentHour();
+  const users = await prisma.$queryRaw<UserSetting[]>`
+    SELECT "telegramId", "dailyLimit", "reminderEnabled", "reminderHour",
+           "lastReminderDate", "goalName", "goalTarget", "goalSaved"
+    FROM "UserSetting"
+    WHERE "reminderEnabled" = 1
+      AND "reminderHour" = ${hour}
+      AND ("lastReminderDate" IS NULL OR "lastReminderDate" != ${today})
+  `;
+
+  for (const user of users) {
+    try {
+      const total = await getTodayTotal(user.telegramId);
+      const goalLine =
+        user.goalName && user.goalTarget
+          ? `\n🏦 Maqsad: ${user.goalName} (${Math.min(100, Math.round(((user.goalSaved || 0) / user.goalTarget) * 100))}%)`
+          : "";
+      const message =
+        total > 0
+          ? `⏰ Bugungi sarfingiz: ${money(total)} so'm.\n📌 Agar yana xarajat bo'lsa, yozib qo'yishni unutmang.${goalLine}`
+          : `⏰ Bugun hali xarajat yozmadingiz.\n💡 10 soniyada kiritib qo'ysangiz, oy oxirida hisobot aniq chiqadi.${goalLine}`;
+
+      await bot.telegram.sendMessage(user.telegramId, message);
+      await prisma.$executeRaw`
+        UPDATE "UserSetting" SET "lastReminderDate" = ${today}
+        WHERE "telegramId" = ${user.telegramId}
+      `;
+    } catch (error) {
+      console.warn(`Reminder yuborilmadi: ${user.telegramId}`, error);
+    }
+  }
+}
+
+function startReminderScheduler() {
+  setInterval(() => {
+    sendDueReminders().catch((error) => console.error("Reminder error:", error));
+  }, 60 * 1000);
+
+  sendDueReminders().catch((error) => console.error("Reminder error:", error));
+}
+
 async function setupBotProfile() {
   await bot.telegram.setMyCommands([
     { command: "start", description: "🚀 Botni boshlash" },
@@ -420,11 +677,11 @@ async function setupBotProfile() {
   ]);
 
   await bot.telegram.setMyShortDescription(
-    "💸 Xarajatlarni yozing, limit qo'ying, hisobot oling.",
+    "💸 Xarajat, grafik hisobot, eslatma va jamg'arma maqsadi.",
   );
 
   await bot.telegram.setMyDescription(
-    "💸 Kunlik Sarf Bot xarajatlaringizni kategoriyaga ajratadi, kunlik/haftalik/oylik hisobot beradi, limitdan oshsangiz ogohlantiradi va CSV export qiladi.",
+    "💸 Kunlik Sarf Bot xarajatlaringizni kategoriyaga ajratadi, grafik hisobot beradi, smart eslatma yuboradi, limit va jamg'arma maqsadlaringizni kuzatadi.",
   );
 }
 
@@ -464,12 +721,32 @@ bot.hears("📊 Oylik hisobot", async (ctx) => {
   await ctx.reply("📊 Oyni tanlang:", monthKeyboard());
 });
 
+bot.hears("📈 Grafik hisobot", async (ctx) => {
+  await showChart(ctx);
+});
+
+bot.hears("⏰ Eslatma", async (ctx) => {
+  const setting = await getSetting(getTelegramId(ctx));
+  const status = setting?.reminderEnabled ? "yoqilgan ✅" : "o'chirilgan 🔕";
+  const hour = setting?.reminderHour || 21;
+
+  await ctx.reply(
+    `⏰ Smart eslatma: ${status}\n🕘 Vaqt: ${hour}:00\n\nBot shu vaqtda xarajat yozishni eslatadi.`,
+    reminderKeyboard(),
+  );
+});
+
 bot.hears("🎯 Limit", async (ctx) => {
   const setting = await getSetting(getTelegramId(ctx));
   const current = setting?.dailyLimit ? `${money(setting.dailyLimit)} so'm` : "hali qo'yilmagan";
 
   ctx.session = { step: "dailyLimit" };
   await ctx.reply(`🎯 Hozirgi kunlik limit: ${current}\n\nYangi limitni kiriting. Masalan: 100000`);
+});
+
+bot.hears("🏦 Maqsad", async (ctx) => {
+  const setting = await getSetting(getTelegramId(ctx));
+  await ctx.reply(`${renderGoal(setting)}\n\nNima qilamiz?`, goalKeyboard());
 });
 
 bot.hears("⚙️ Boshqarish", async (ctx) => {
@@ -526,6 +803,11 @@ bot.action("weekly", async (ctx) => {
   await showWeekly(ctx);
 });
 
+bot.action("chart_report", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showChart(ctx);
+});
+
 bot.action("top_category", async (ctx) => {
   await ctx.answerCbQuery();
   await showTopCategory(ctx);
@@ -534,6 +816,57 @@ bot.action("top_category", async (ctx) => {
 bot.action("export_csv", async (ctx) => {
   await ctx.answerCbQuery();
   await exportCsv(ctx);
+});
+
+bot.action("reminder_on", async (ctx) => {
+  await setReminder(getTelegramId(ctx), true);
+  await ctx.answerCbQuery("Eslatma yoqildi");
+  await ctx.reply("✅ Smart eslatma yoqildi.", mainKeyboard());
+});
+
+bot.action("reminder_off", async (ctx) => {
+  await setReminder(getTelegramId(ctx), false);
+  await ctx.answerCbQuery("Eslatma o'chirildi");
+  await ctx.reply("🔕 Smart eslatma o'chirildi.", mainKeyboard());
+});
+
+bot.action(/reminder_hour_(\d+)/, async (ctx) => {
+  const hour = Number(ctx.match[1]);
+
+  await setReminder(getTelegramId(ctx), true, hour);
+  await ctx.answerCbQuery(`${hour}:00 tanlandi`);
+  await ctx.reply(`⏰ Smart eslatma har kuni ${hour}:00 da yuboriladi.`, mainKeyboard());
+});
+
+bot.action("goal_set", async (ctx) => {
+  ctx.session = { step: "goalName" };
+
+  await ctx.answerCbQuery();
+  await ctx.reply("🏦 Maqsad nomini yozing. Masalan: iPhone, sayohat, zaxira fond");
+});
+
+bot.action("goal_add", async (ctx) => {
+  const setting = await getSetting(getTelegramId(ctx));
+
+  await ctx.answerCbQuery();
+
+  if (!setting?.goalName || !setting.goalTarget) {
+    return ctx.reply("🏦 Avval maqsad qo'ying.", goalKeyboard());
+  }
+
+  ctx.session = { step: "goalSaving" };
+  return ctx.reply("➕ Maqsadga qancha pul qo'shdingiz? Masalan: 50000");
+});
+
+bot.action("goal_view", async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.reply(renderGoal(await getSetting(getTelegramId(ctx))), goalKeyboard());
+});
+
+bot.action("goal_clear", async (ctx) => {
+  await clearGoal(getTelegramId(ctx));
+  await ctx.answerCbQuery("Maqsad tozalandi");
+  await ctx.reply("🧹 Maqsad tozalandi.", mainKeyboard());
 });
 
 bot.action("delete_expense", async (ctx) => {
@@ -751,6 +1084,39 @@ bot.on("text", async (ctx, next) => {
     return ctx.reply(`🎯 Kunlik limit saqlandi: ${money(amount)} so'm`, mainKeyboard());
   }
 
+  if (ctx.session.step === "goalName") {
+    ctx.session.goalName = text.slice(0, 80);
+    ctx.session.step = "goalTarget";
+
+    return ctx.reply("🎯 Bu maqsad uchun qancha pul kerak? Masalan: 10000000");
+  }
+
+  if (ctx.session.step === "goalTarget") {
+    const amount = parseAmount(text);
+
+    if (!amount || !ctx.session.goalName) {
+      return ctx.reply("❌ To'g'ri summa kiriting. Masalan: 10000000");
+    }
+
+    await setGoal(telegramId, ctx.session.goalName, amount);
+    ctx.session = {};
+
+    return ctx.reply(`🏦 Maqsad saqlandi!\n\n${renderGoal(await getSetting(telegramId))}`, mainKeyboard());
+  }
+
+  if (ctx.session.step === "goalSaving") {
+    const amount = parseAmount(text);
+
+    if (!amount) {
+      return ctx.reply("❌ To'g'ri summa kiriting. Masalan: 50000");
+    }
+
+    await addGoalSaving(telegramId, amount);
+    ctx.session = {};
+
+    return ctx.reply(`✅ Jamg'armaga ${money(amount)} so'm qo'shildi!\n\n${renderGoal(await getSetting(telegramId))}`, mainKeyboard());
+  }
+
   return next();
 });
 
@@ -766,6 +1132,7 @@ async function main() {
   await ensureDatabase();
   await setupBotProfile();
   await bot.launch();
+  startReminderScheduler();
   console.log("Bot ishga tushdi");
 }
 
