@@ -2,7 +2,7 @@ import { Context, Markup, Telegraf, session } from "telegraf";
 import { PrismaClient } from "@prisma/client";
 import dotenv from "dotenv";
 
-dotenv.config();
+dotenv.config({ override: true });
 
 const token = process.env.BOT_TOKEN;
 
@@ -1131,9 +1131,9 @@ process.once("SIGTERM", () => bot.stop("SIGTERM"));
 async function main() {
   await ensureDatabase();
   await setupBotProfile();
-  await bot.launch();
   startReminderScheduler();
   console.log("Bot ishga tushdi");
+  await bot.launch();
 }
 
 main().catch(async (error) => {

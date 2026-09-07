@@ -4,3 +4,5 @@ dist/
 *.db
 *.db-journal
 npm-debug.log*
+bot.log
+bot.pid
